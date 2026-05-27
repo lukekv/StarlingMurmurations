@@ -1304,17 +1304,47 @@ def main() -> None:
         "--output", required=True,
         help='Path to the pipeline output folder (e.g. "D:\\...\\Texture Library Test\\_output")',
     )
-    args   = parser.parse_args()
-    output_dir = Path(args.output)
+    parser.add_argument(
+        "--html-out",
+        help=(
+            "Path for the output HTML file. Defaults to library_preview.html inside --output. "
+            "May be placed in a parent directory of --output; relative asset paths are "
+            "adjusted automatically."
+        ),
+    )
+    args       = parser.parse_args()
+    output_dir = Path(args.output).resolve()
 
     if not output_dir.is_dir():
         sys.exit(f"ERROR: Output folder not found: {output_dir}")
+
+    # Resolve the HTML output path.
+    html_path = Path(args.html_out).resolve() if args.html_out else output_dir / HTML_FILENAME
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # If the HTML lives outside output_dir, compute the prefix that must be prepended
+    # to all relative asset paths so the browser can resolve thumbnails and images.
+    html_dir = html_path.parent
+    if html_dir == output_dir:
+        path_prefix = ""
+    else:
+        try:
+            path_prefix = str(output_dir.relative_to(html_dir)).replace("\\", "/")
+        except ValueError:
+            sys.exit(
+                f"ERROR: --html-out must be inside or in a parent directory of --output.\n"
+                f"  HTML dir : {html_dir}\n"
+                f"  Output   : {output_dir}"
+            )
 
     thumb_dir = output_dir / THUMB_DIR
     thumb_dir.mkdir(exist_ok=True)
 
     print(f"Output folder : {output_dir}")
     print(f"Thumbnails    : {thumb_dir}")
+    print(f"HTML output   : {html_path}")
+    if path_prefix:
+        print(f"Path prefix   : {path_prefix}/")
     print()
 
     print("Scanning organised textures...")
@@ -1343,10 +1373,19 @@ def main() -> None:
     if not all_cats:
         sys.exit("Nothing to preview. Has the pipeline run against this output folder?")
 
+    # When the HTML file lives outside output_dir, prepend the relative path to
+    # output_dir on every thumb and base_img path so the browser resolves them correctly.
+    if path_prefix:
+        for items in all_cats.values():
+            for item in items:
+                if item.get("thumb"):
+                    item["thumb"] = f"{path_prefix}/{item['thumb']}"
+                if item.get("base_img"):
+                    item["base_img"] = f"{path_prefix}/{item['base_img']}"
+
     print()
     print("Building HTML...")
-    html      = build_html(all_cats)
-    html_path = output_dir / HTML_FILENAME
+    html = build_html(all_cats)
     html_path.write_text(html, encoding="utf-8")
 
     size_kb = html_path.stat().st_size // 1024
