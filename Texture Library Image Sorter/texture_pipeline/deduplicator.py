@@ -238,19 +238,50 @@ class Deduplicator:
         Returns list of (group_id_a, group_id_b, hamming_distance).
         Pairs are de-duplicated so each (a, b) appears once with a < b
         lexicographically.
+
+        Cross-run / merge support: the BK-tree is pre-seeded with all
+        pHashes already stored in the database (from previous pipeline runs
+        or a prior processing of the same library).  This means a new file
+        that is visually identical to an entry already in the library will
+        be detected and marked as the duplicate loser, regardless of whether
+        the two files were processed in the same run.
         """
-        threshold = self.config.phash_hamming_threshold
+        threshold    = self.config.phash_hamming_threshold
+        new_group_ids = set(phash_map.keys())
 
         tree = _BKTree()
-        group_ids = list(phash_map.keys())
-        for gid in group_ids:
+
+        # ── Seed tree with existing DB pHashes (previous / other runs) ──────
+        # Skip any group_id that is part of the current batch -- those are
+        # added below with full metadata.
+        existing_in_db: Set[str] = set()
+        for row in self.db.get_all_phashes():
+            gid       = row["group_id"]
+            phash_hex = row["phash"]
+            if gid in new_group_ids:
+                continue  # current-batch group; added below
+            try:
+                tree.add(gid, int(phash_hex, 16))
+                existing_in_db.add(gid)
+            except (ValueError, TypeError):
+                continue  # malformed hash in DB -- skip silently
+
+        if existing_in_db:
+            logger.debug(
+                "Deduplication: seeded BK-tree with %d existing library hash(es).",
+                len(existing_in_db),
+            )
+
+        # ── Add current-batch hashes ─────────────────────────────────────────
+        for gid in new_group_ids:
             _, phash_hex, _ = phash_map[gid]
             tree.add(gid, int(phash_hex, 16))
 
-        seen: Set[Tuple[str, str]] = set()
+        seen:  Set[Tuple[str, str]]      = set()
         pairs: List[Tuple[str, str, int]] = []
 
-        for gid in group_ids:
+        # Only query new groups -- existing library groups are already decided.
+        for gid in new_group_ids:
             _, phash_hex, _ = phash_map[gid]
             matches = tree.search(int(phash_hex, 16), threshold)
             for match_gid, dist in matches:
@@ -277,11 +308,26 @@ class Deduplicator:
         For each duplicate pair, determine which group to keep (higher
         base-map resolution; tie-break: alphabetical base_name) and mark
         the other as a duplicate in the database.
+
+        For cross-run pairs where one group is from a previous run, the
+        existing library entry is always the keeper and the incoming file
+        is always the loser.  base_name for DB-only groups is read from
+        the database row rather than phash_map.
         """
         for gid_a, gid_b, dist in pairs:
             keeper, loser = self._resolve_keeper(gid_a, gid_b, phash_map)
-            base_name_keeper = phash_map[keeper][0]
-            base_name_loser  = phash_map[loser][0]
+            # phash_map only contains current-batch groups; existing DB
+            # groups are resolved by reading their database row.
+            if keeper in phash_map:
+                base_name_keeper = phash_map[keeper][0]
+            else:
+                row = self.db.get_group(keeper)
+                base_name_keeper = row["base_name"] if row else keeper
+            if loser in phash_map:
+                base_name_loser = phash_map[loser][0]
+            else:
+                row = self.db.get_group(loser)
+                base_name_loser = row["base_name"] if row else loser
             self.db.mark_group_duplicate(loser, keeper)
             logger.info(
                 "Duplicate (hamming=%d): KEEP '%s' | DISCARD '%s'",
@@ -298,9 +344,22 @@ class Deduplicator:
         Return (keeper_group_id, loser_group_id).
 
         Decision order:
-          1. Larger base-map pixel area (cached from pHash pass -- no image re-open).
-          2. Alphabetical base_name (first alphabetically is kept).
+          1. Cross-run priority: if one group is from a previous run (not in
+             the current phash_map), it is always the keeper.  The incoming
+             file is the duplicate, not the already-processed library entry.
+          2. Larger base-map pixel area (cached from pHash pass -- no re-open).
+          3. Alphabetical base_name (first alphabetically is kept).
         """
+        in_batch_a = gid_a in phash_map
+        in_batch_b = gid_b in phash_map
+
+        # Cross-run: existing library entry wins unconditionally
+        if in_batch_a and not in_batch_b:
+            return (gid_b, gid_a)   # gid_b is existing keeper, gid_a is new loser
+        if in_batch_b and not in_batch_a:
+            return (gid_a, gid_b)   # gid_a is existing keeper, gid_b is new loser
+
+        # Same-batch: resolve by pixel area then name
         _, _, area_a = phash_map.get(gid_a, ("", "", 0))
         _, _, area_b = phash_map.get(gid_b, ("", "", 0))
 
