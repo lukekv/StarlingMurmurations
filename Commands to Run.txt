@@ -1,0 +1,3 @@
+.\run_pipeline
+
+C:\Python314\python.exe "D:\_AI\Texture Library Image Sorter\serve_preview.py" --output "D:\_AI\Texture Library Image Sorter\_Shared Asset Library\_output"

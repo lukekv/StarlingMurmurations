@@ -1,0 +1,34 @@
+# ── Texture library asset data (never commit the actual textures) ────────────
+_MHOA Basic Materials/
+_Shared Asset Library/
+
+# ── Pipeline output (generated, fully reproducible from source) ──────────────
+_output/
+
+# ── SQLite pipeline state databases ─────────────────────────────────────────
+*.db
+
+# ── Node dependencies ────────────────────────────────────────────────────────
+node_modules/
+
+# ── Python cache ─────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+
+# ── Slide QA images (generated during PPTX visual review) ───────────────────
+slide_previews/
+
+# ── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ── IDE / editor ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user

@@ -1,0 +1,20 @@
+# Texture Library Pipeline — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Image processing
+Pillow>=10.0.0          # image open, crop, resize, format detection, PNG conversion
+opencv-python>=4.8.0    # Sobel gradient computation for tileability test
+
+# Perceptual hashing (duplicate detection)
+imagehash>=4.3.1        # pHash computation and Hamming distance comparison
+
+# Fuzzy string matching (PBR group identification)
+rapidfuzz>=3.0.0        # fast Levenshtein / partial ratio for base name grouping
+
+# AI response validation
+pydantic>=2.0.0         # strict schema enforcement on Ollama JSON responses
+
+# Ollama / LM Studio API client
+openai>=1.0.0           # OpenAI-compatible HTTP client used for both Ollama and LM Studio
+                        # Ollama endpoint: http://localhost:11434/v1
+                        # LM Studio endpoint: http://localhost:1234/v1
