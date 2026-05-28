@@ -32,3 +32,9 @@ ehthumbs.db
 .idea/
 *.suo
 *.user
+
+# ── GUI user settings (machine-specific paths; not portable) ─────────────────
+gui_settings.json
+
+# ── Rescan logs (generated output) ───────────────────────────────────────────
+rescan_*.log

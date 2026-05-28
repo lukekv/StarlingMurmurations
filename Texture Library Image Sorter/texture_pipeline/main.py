@@ -79,12 +79,41 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--override-pass", action="store_true",
                    help="Run the tileability AI override pass independently "
                         "(processes all TILEABILITY_FAILED groups in the database).")
+
+    # --- Runtime / model overrides (used by GUI) ----------------------------
+    p.add_argument("--ai-model",            default=None,
+                   help="Ollama model tag, e.g. gemma4:e4b")
+    p.add_argument("--cpu-workers",         type=int,   default=None,
+                   help="Thread-pool size for CPU-bound passes")
+
+    # --- Filter thresholds --------------------------------------------------
+    p.add_argument("--blank-stddev",         type=float, default=None,
+                   help="Std-dev threshold below which an image is considered blank")
+    p.add_argument("--product-edge-stddev",  type=float, default=None,
+                   help="Edge std-dev threshold for product-photo detection")
+    p.add_argument("--line-art-threshold",   type=float, default=None,
+                   help="White-pixel ratio above which an image is classified line-art")
+    p.add_argument("--tile-gradient",        type=float, default=None,
+                   help="Gradient ratio threshold for tileability pass")
+    p.add_argument("--tile-seam-diff",       type=float, default=None,
+                   help="Seam difference threshold for tileability pass")
+    p.add_argument("--tile-offset-seam",     type=float, default=None,
+                   help="Offset-seam projected gradient ratio threshold (Signal 3)")
+    p.add_argument("--phash-hamming",        type=int,   default=None,
+                   help="Maximum Hamming distance for pHash duplicate detection")
+    p.add_argument("--min-resolution",       type=int,   default=None,
+                   help="Minimum short-side resolution in pixels")
+    p.add_argument("--auto-bin-tileability", action="store_true",
+                   help="Bin tileability failures instead of sending to review")
+    p.add_argument("--skip-quality-checks",  action="store_true",
+                   help="Skip pre-filters 2–4 and tileability test (trusted source)")
+
     return p.parse_args()
 
 
 def _build_config(args: argparse.Namespace) -> Config:
     out = Path(args.output)
-    return Config(
+    kwargs: dict = dict(
         input_dir             = Path(args.input),
         output_dir            = out,
         recycle_bin_dir       = Path(args.recycle_bin) if args.recycle_bin else out / "_recycle_bin",
@@ -92,6 +121,32 @@ def _build_config(args: argparse.Namespace) -> Config:
         db_path               = Path(args.db)           if args.db           else out / "pipeline_state.db",
         duplicate_report_path = out / "duplicate_report.txt",
     )
+    # Optional overrides from CLI (GUI passes these when non-default)
+    if args.ai_model is not None:
+        kwargs["ai_model"] = args.ai_model
+    if args.cpu_workers is not None:
+        kwargs["cpu_workers"] = args.cpu_workers
+    if args.blank_stddev is not None:
+        kwargs["blank_image_stddev_bin"] = args.blank_stddev
+    if args.product_edge_stddev is not None:
+        kwargs["product_photo_edge_stddev_threshold"] = args.product_edge_stddev
+    if args.line_art_threshold is not None:
+        kwargs["line_art_white_pixel_threshold"] = args.line_art_threshold
+    if args.tile_gradient is not None:
+        kwargs["tileability_gradient_ratio_threshold"] = args.tile_gradient
+    if args.tile_seam_diff is not None:
+        kwargs["tileability_seam_diff_threshold"] = args.tile_seam_diff
+    if args.tile_offset_seam is not None:
+        kwargs["tileability_offset_seam_ratio_threshold"] = args.tile_offset_seam
+    if args.phash_hamming is not None:
+        kwargs["phash_hamming_threshold"] = args.phash_hamming
+    if args.min_resolution is not None:
+        kwargs["min_resolution_px"] = args.min_resolution
+    if args.auto_bin_tileability:
+        kwargs["auto_bin_tileability_failures"] = True
+    if args.skip_quality_checks:
+        kwargs["skip_quality_checks"] = True
+    return Config(**kwargs)
 
 
 # ---------------------------------------------------------------------------

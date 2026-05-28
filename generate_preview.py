@@ -22,6 +22,7 @@ Dependencies: Pillow (already in requirements.txt)
 import argparse
 import json
 import sys
+import warnings
 from pathlib import Path
 
 try:
@@ -53,20 +54,36 @@ def make_thumbnail(src: Path, thumb_dir: Path, prefix: str = "") -> str | None:
     """
     Generate a 256px JPEG thumbnail and return its relative path from
     the output root (e.g. '_thumbnails/Wood_Cedar_01.jpg').
-    Returns None on failure. Skips generation if the thumbnail already exists.
+    Returns None on failure.
+
+    Caching behaviour:
+      - Non-empty .jpg exists  → real thumbnail, returned immediately (no re-generate).
+      - Empty .jpg exists      → skip marker left by a previous failure, skip silently.
+      - No file               → attempt generation.
+
+    Very large images (> Pillow's decompression-bomb limit, ~178 MP) raise
+    DecompressionBombError.  On any failure an empty marker file is touched so
+    the image is never retried on subsequent runs.  DecompressionBombWarning
+    (89–178 MP range) is suppressed; those images still thumbnail successfully.
     """
     safe_stem = src.stem.replace(" ", "_")
     thumb_name = f"{prefix}{safe_stem}.jpg"
     thumb_path = thumb_dir / thumb_name
 
-    if not thumb_path.exists():
-        try:
+    if thumb_path.exists():
+        # Empty file = skip marker from a previous failure — don't retry
+        return f"{THUMB_DIR}/{thumb_name}" if thumb_path.stat().st_size > 0 else None
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")   # suppress DecompressionBombWarning
             img = Image.open(src).convert("RGB")
-            img.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
-            img.save(thumb_path, "JPEG", quality=75, optimize=True)
-        except Exception as exc:
-            print(f"  WARNING: thumbnail failed for {src.name}: {exc}")
-            return None
+        img.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
+        img.save(thumb_path, "JPEG", quality=75, optimize=True)
+    except Exception as exc:
+        print(f"  WARNING: thumbnail failed for {src.name}: {exc}")
+        thumb_path.touch()   # empty marker: skip on future runs
+        return None
 
     return f"{THUMB_DIR}/{thumb_name}"
 
@@ -538,6 +555,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
                border-radius: 5px; color: #7aabff; font-size: 12px;
                cursor: pointer; transition: background 0.1s; }
 #lb-copy-btn:hover { background: #263848; }
+#lb-tile-btn { margin-top: 6px; width: 100%; padding: 8px;
+               background: #1e2e1e; border: 1px solid #2a5a3a;
+               border-radius: 5px; color: #7affb2; font-size: 12px;
+               cursor: pointer; transition: background 0.1s; }
+#lb-tile-btn:hover { background: #263a30; }
+
+/* ---- Tile preview (inside lightbox) ---- */
+#tp-canvas { display: none; cursor: crosshair; }
+#lb-tile-controls { display: none; margin-top: 10px;
+                    border-top: 1px solid #2a2a2a; padding-top: 10px; }
+.lb-tile-label { font-size: 10px; color: #555; margin-bottom: 6px;
+                 text-transform: uppercase; letter-spacing: 0.06em; }
+#tp-mode-btns { display: flex; flex-wrap: wrap; gap: 5px; }
+.tp-btn { padding: 5px 9px; border-radius: 4px; border: 1px solid #333;
+          background: #222; color: #aaa; font-size: 11px; cursor: pointer;
+          transition: background 0.1s, color 0.1s; }
+.tp-btn:hover  { background: #2a2a2a; color: #ddd; }
+.tp-btn.active { background: #1e3040; border-color: #2a5070; color: #7aabff; }
 
 /* ---- Review action buttons ---- */
 .review-actions { display: flex; gap: 6px; margin-top: 8px; }
@@ -641,6 +676,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     <button id="lb-close" onclick="closeLightbox()">&#x2715;</button>
     <div id="lb-img-wrap">
       <img id="lb-img" src="" alt="">
+      <canvas id="tp-canvas"></canvas>
     </div>
     <div id="lb-meta">
       <div id="lb-name"></div>
@@ -658,6 +694,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         <div id="lb-tags"></div>
       </div>
       <button id="lb-copy-btn" onclick="copyActivePath()">Copy folder path</button>
+      <button id="lb-tile-btn" onclick="toggleTilePreview()">Tile Preview</button>
+      <div id="lb-tile-controls">
+        <div class="lb-tile-label">Tile mode</div>
+        <div id="tp-mode-btns">
+          <button class="tp-btn active" id="btn-offset" onclick="setTileMode('offset')">Offset ½</button>
+          <button class="tp-btn"        id="btn-grid"   onclick="setTileMode('grid')">3&#x00D7;3 Grid</button>
+          <button class="tp-btn"        id="btn-seam"   onclick="toggleSeamLines()">Seam Lines</button>
+          <button class="tp-btn"                        onclick="fitTileView();drawTile()">Fit</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -692,6 +738,7 @@ const CATEGORIES = [];
 let currentCat    = (DATA[0] || [])[0] || "";
 let searchQuery   = "";
 let activePath    = "";
+let activeItem    = null;
 let _changeCount  = 0;
 let filterPbrOnly = false;
 let _selected      = new Set();
@@ -983,6 +1030,7 @@ function makeCard(item) {
 // ---- Lightbox ----
 function openLightbox(item) {
   activePath = item.folder_path;
+  activeItem = item;
   document.getElementById("lb-img").src = item.base_img || "";
   document.getElementById("lb-name").textContent = item.name;
   document.getElementById("lb-source").textContent = item.source_file || "";
@@ -1011,6 +1059,7 @@ function openLightbox(item) {
 }
 
 function closeLightbox() {
+  if (tpImg) closeTilePreview();
   document.getElementById("lightbox").classList.remove("open");
   document.getElementById("lb-img").src = "";
 }
@@ -1276,6 +1325,171 @@ document.addEventListener("keydown", e => {
 // ---- Init ----
 renderTabs();
 renderGrid();
+
+// ---- Tile Preview (in-lightbox) ----------------------------------------
+let tileMode  = 'offset';   // 'offset' | 'grid'
+let seamLines = false;
+let tpZoom = 1.0, tpOffsetX = 0, tpOffsetY = 0;
+let tpDragging = false, tpDragLast = {x: 0, y: 0};
+let tpImg = null;
+
+function toggleTilePreview() {
+  tpImg ? closeTilePreview() : openTilePreview();
+}
+
+function openTilePreview() {
+  if (!activeItem || !activeItem.base_img) return;
+
+  // Size canvas to the current image-wrap area before swapping content
+  const wrap   = document.getElementById('lb-img-wrap');
+  const canvas = document.getElementById('tp-canvas');
+  canvas.width  = wrap.offsetWidth;
+  canvas.height = wrap.offsetHeight;
+
+  // Swap: hide static image, show canvas
+  document.getElementById('lb-img').style.display = 'none';
+  canvas.style.display = 'block';
+
+  // Show mode controls; flip button label
+  document.getElementById('lb-tile-controls').style.display = 'block';
+  document.getElementById('lb-tile-btn').textContent = '↩ Back to Image';
+
+  // Reset mode state
+  tileMode  = 'offset';
+  seamLines = false;
+  document.getElementById('btn-offset').classList.add('active');
+  document.getElementById('btn-grid').classList.remove('active');
+  document.getElementById('btn-seam').classList.remove('active');
+
+  // Load image -> auto-fit zoom -> draw
+  tpImg = new Image();
+  tpImg.onload = function () { fitTileView(); drawTile(); };
+  tpImg.src = activeItem.base_img;
+}
+
+function closeTilePreview() {
+  document.getElementById('tp-canvas').style.display = 'none';
+  document.getElementById('lb-img').style.display    = '';
+  document.getElementById('lb-tile-controls').style.display = 'none';
+  document.getElementById('lb-tile-btn').textContent = 'Tile Preview';
+  tpImg = null;
+}
+
+function fitTileView() {
+  // Zoom so the full tiled extent fills the canvas with a small margin.
+  // Offset 1/2 shows 2x2 area (seam at centre); 3x3 Grid shows 3x3 tiles.
+  if (!tpImg) return;
+  const canvas = document.getElementById('tp-canvas');
+  const cw = canvas.width, ch = canvas.height;
+  const iw = tpImg.naturalWidth, ih = tpImg.naturalHeight;
+  if (!iw || !ih) return;
+  const span = (tileMode === 'offset') ? 2 : 3;
+  tpOffsetX = 0;
+  tpOffsetY = 0;
+  tpZoom    = Math.min(cw / (span * iw), ch / (span * ih)) * 0.92;
+}
+
+function drawTile() {
+  if (!tpImg) return;
+  const canvas = document.getElementById('tp-canvas');
+  const ctx    = canvas.getContext('2d');
+  const cw = canvas.width, ch = canvas.height;
+
+  const iw = tpImg.naturalWidth, ih = tpImg.naturalHeight;
+  if (!iw || !ih) return;
+
+  ctx.save();
+  ctx.translate(cw / 2 + tpOffsetX, ch / 2 + tpOffsetY);
+  ctx.scale(tpZoom, tpZoom);
+
+  if (tileMode === 'offset') {
+    // Tile origin at canvas-centre → four tile corners meet at the crosshair.
+    // Seams appear at the centre, making any mismatch immediately obvious.
+    const cols = Math.ceil(cw / tpZoom / iw / 2) + 2;
+    const rows = Math.ceil(ch / tpZoom / ih / 2) + 2;
+    for (let c = -cols; c <= cols; c++)
+      for (let r = -rows; r <= rows; r++)
+        ctx.drawImage(tpImg, c * iw, r * ih);
+  } else {
+    // 3×3 grid: centre tile centred on the canvas; seams between tiles.
+    for (let c = -1; c <= 1; c++)
+      for (let r = -1; r <= 1; r++)
+        ctx.drawImage(tpImg, c * iw - iw / 2, r * ih - ih / 2);
+  }
+
+  if (seamLines) {
+    ctx.strokeStyle = 'rgba(255,80,80,0.75)';
+    ctx.lineWidth   = 2 / tpZoom;
+    const range = Math.ceil(Math.max(cw, ch) / tpZoom / Math.min(iw, ih)) + 3;
+    const bigD  = (Math.max(cw, ch) / tpZoom + Math.max(iw, ih)) * 2;
+    // Seam positions differ by mode: offset → at multiples of iw; grid → offset by ½
+    const ox = (tileMode === 'offset') ? 0 : -iw / 2;
+    const oy = (tileMode === 'offset') ? 0 : -ih / 2;
+    for (let i = -range; i <= range; i++) {
+      ctx.beginPath(); ctx.moveTo(i * iw + ox, -bigD); ctx.lineTo(i * iw + ox, bigD); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-bigD, i * ih + oy); ctx.lineTo(bigD, i * ih + oy); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function setTileMode(mode) {
+  tileMode = mode;
+  document.getElementById('btn-offset').classList.toggle('active', mode === 'offset');
+  document.getElementById('btn-grid').classList.toggle('active',   mode === 'grid');
+  fitTileView();   // re-zoom to fit the new extent before redrawing
+  drawTile();
+}
+
+function toggleSeamLines() {
+  seamLines = !seamLines;
+  document.getElementById('btn-seam').classList.toggle('active', seamLines);
+  drawTile();
+}
+
+function resetTpZoom() {
+  tpZoom = 1; tpOffsetX = 0; tpOffsetY = 0;
+  drawTile();
+}
+
+// Zoom toward cursor + click-drag pan on the in-lightbox canvas
+(function () {
+  const canvas = document.getElementById('tp-canvas');
+
+  canvas.addEventListener('wheel', function (e) {
+    if (!tpImg) return;
+    e.preventDefault();
+    const factor  = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const rect    = canvas.getBoundingClientRect();
+    const mx      = e.clientX - rect.left - canvas.width  / 2;
+    const my      = e.clientY - rect.top  - canvas.height / 2;
+    const newZoom = Math.min(12, Math.max(0.05, tpZoom * factor));
+    tpOffsetX = mx - (mx - tpOffsetX) * (newZoom / tpZoom);
+    tpOffsetY = my - (my - tpOffsetY) * (newZoom / tpZoom);
+    tpZoom    = newZoom;
+    drawTile();
+  }, { passive: false });
+
+  canvas.addEventListener('mousedown', function (e) {
+    if (!tpImg) return;
+    tpDragging = true;
+    tpDragLast = { x: e.clientX, y: e.clientY };
+    canvas.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mousemove', function (e) {
+    if (!tpDragging) return;
+    tpOffsetX += e.clientX - tpDragLast.x;
+    tpOffsetY += e.clientY - tpDragLast.y;
+    tpDragLast = { x: e.clientX, y: e.clientY };
+    drawTile();
+  });
+  window.addEventListener('mouseup', function () {
+    if (tpDragging) {
+      tpDragging = false;
+      if (tpImg) canvas.style.cursor = 'crosshair';
+    }
+  });
+})();
 </script>
 </body>
 </html>
