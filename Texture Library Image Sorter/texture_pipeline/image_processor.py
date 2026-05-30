@@ -176,23 +176,24 @@ class ImageProcessor:
                 is_tileable=False, binned_resolution=True, base_dims=(w, h),
             )
 
-        # --- Pre-filter 2: blank / solid-colour image ------------------------
-        result = self._check_blank(img, group)
-        if result is not None:
-            img.close()
-            return result
+        if not self.config.skip_quality_checks:
+            # --- Pre-filter 2: blank / solid-colour image --------------------
+            result = self._check_blank(img, group)
+            if result is not None:
+                img.close()
+                return result
 
-        # --- Pre-filter 3: line-art / technical drawing ----------------------
-        result = self._check_line_art(img, group)
-        if result is not None:
-            img.close()
-            return result
+            # --- Pre-filter 3: line-art / technical drawing ------------------
+            result = self._check_line_art(img, group)
+            if result is not None:
+                img.close()
+                return result
 
-        # --- Pre-filter 4: product photo / isolated-object detection ---------
-        result = self._check_product_photo(img, group)
-        if result is not None:
-            img.close()
-            return result
+            # --- Pre-filter 4: product photo / isolated-object detection -----
+            result = self._check_product_photo(img, group)
+            if result is not None:
+                img.close()
+                return result
 
         # --- Phase 2: square check and crop ----------------------------------
         crop_bbox = self._compute_crop_bbox(w, h)
@@ -214,7 +215,13 @@ class ImageProcessor:
         # --- Phase 3: tileability --------------------------------------------
         self.db.update_group_status(group.group_id, GroupStatus.TILEABILITY)
 
-        if self._has_tileability_bypass(group.base_name):
+        if self.config.skip_quality_checks:
+            logger.info(
+                "Quality/tileability checks skipped for '%s': trusted source.",
+                group.base_name,
+            )
+            is_tileable = True
+        elif self._has_tileability_bypass(group.base_name):
             logger.info(
                 "Tileability bypassed for '%s': filename keyword match.",
                 group.base_name,
@@ -451,7 +458,7 @@ class ImageProcessor:
 
     def _test_tileability(self, img: Image.Image, name: str) -> bool:
         """
-        Two-signal tileability test.  Both signals must pass.
+        Three-signal tileability test.  All three signals must pass.
 
         Signal 1 -- Interior gradient spike
             Sobel magnitude at each 8px edge strip is compared to the
@@ -467,6 +474,18 @@ class ImageProcessor:
             identical.  Artwork, renders, and non-seamless photography have
             no spatial relationship between opposite edges and score high.
             This is the primary catch for the Art category.
+
+        Signal 3 -- Offset seam projected gradient
+            The image is rolled 50 % in X and Y so the tile seam falls at
+            the centre.  A 1-D gradient magnitude profile is projected along
+            each axis; the ratio of the centre-strip mean to the non-centre
+            baseline must not exceed tileability_offset_seam_ratio_threshold.
+            A perfectly seamless texture has no gradient spike at centre.
+            A texture with phase-misaligned patterns -- e.g. brick courses
+            cut at the wrong row so opposite edges are the same colour but
+            the pattern does not continue -- shows a prominent ridge where
+            the two halves meet.  Signals 1 and 2 cannot detect this case;
+            Signal 3 is specifically designed for it.
 
         Returns True (tileable) or False (seam or mismatch detected).
         """
@@ -513,9 +532,16 @@ class ImageProcessor:
         # High-pass filter removes low-frequency lighting gradients before
         # edge comparison so directionally-lit textures are not penalised.
         # ------------------------------------------------------------------
+        lf_grad_std: Optional[float] = None
         if self.config.tileability_seam_highpass_enabled:
-            blur_k = max(31, round(min(h_px, w_px) * self.config.tileability_seam_highpass_blur_fraction))
-            rgb_cmp = rgb - cv2.blur(rgb, (blur_k, blur_k))
+            blur_k   = max(31, round(min(h_px, w_px) * self.config.tileability_seam_highpass_blur_fraction))
+            lf_blur  = cv2.blur(rgb, (blur_k, blur_k))
+            rgb_cmp  = rgb - lf_blur
+            # Low-frequency gradient std: std of the lighting envelope across
+            # all channels.  High values indicate baked directional lighting
+            # (characteristic of render previews).  Logged for calibration;
+            # not currently used as a filter threshold.
+            lf_grad_std = float(lf_blur.std())
         else:
             rgb_cmp = rgb
 
@@ -529,16 +555,65 @@ class ImageProcessor:
         worst_seam  = max(h_seam_diff, v_seam_diff)
         seam_pass   = worst_seam <= seam_threshold
 
-        is_tileable = grad_pass and seam_pass
+        # ------------------------------------------------------------------
+        # Signal 3: offset seam projected gradient
+        # Roll image 50 % in X and Y so the tile seam appears at centre.
+        # Project the Sobel gradient magnitude along each axis and compare
+        # the centre-strip mean to the non-centre baseline.  A seamless
+        # texture shows no spike at centre; a phase-misaligned texture
+        # (same edge colours but the pattern doesn't continue) shows a ridge.
+        # ------------------------------------------------------------------
+        offset_gray = np.roll(gray, h_px // 2, axis=0)
+        offset_gray = np.roll(offset_gray, w_px // 2, axis=1)
 
+        ogx = cv2.Sobel(offset_gray, cv2.CV_64F, 1, 0, ksize=3)
+        ogy = cv2.Sobel(offset_gray, cv2.CV_64F, 0, 1, ksize=3)
+        offset_mag = np.hypot(ogx, ogy)
+
+        row_profile = offset_mag.mean(axis=1)   # shape (H,) -- ridge = horiz seam
+        col_profile = offset_mag.mean(axis=0)   # shape (W,) -- ridge = vert  seam
+
+        cy, cx = h_px // 2, w_px // 2
+
+        row_nonseam = np.concatenate([
+            row_profile[strip : cy - strip],
+            row_profile[cy + strip : h_px - strip],
+        ])
+        col_nonseam = np.concatenate([
+            col_profile[strip : cx - strip],
+            col_profile[cx + strip : w_px - strip],
+        ])
+
+        row_spike    = 0.0
+        col_spike    = 0.0
+        worst_offset = 0.0
+        offset_pass  = True
+
+        if len(row_nonseam) > 0 and len(col_nonseam) > 0:
+            center_row   = float(row_profile[cy - strip : cy + strip].mean())
+            center_col   = float(col_profile[cx - strip : cx + strip].mean())
+            row_spike    = center_row / max(float(row_nonseam.mean()), 1e-6)
+            col_spike    = center_col / max(float(col_nonseam.mean()), 1e-6)
+            worst_offset = max(row_spike, col_spike)
+            offset_pass  = (
+                worst_offset <= self.config.tileability_offset_seam_ratio_threshold
+            )
+
+        is_tileable = grad_pass and seam_pass and offset_pass
+
+        lf_str = f" | lf_grad_std={lf_grad_std:.1f}" if lf_grad_std is not None else ""
         logger.debug(
             "Tileability '%s': interior_mean=%.2f worst_grad_ratio=%.3f "
-            "grad=%s | h_seam=%.1f v_seam=%.1f worst_seam=%.1f seam=%s -> %s",
+            "grad=%s | h_seam=%.1f v_seam=%.1f worst_seam=%.1f seam=%s "
+            "| row_spike=%.3f col_spike=%.3f worst_offset=%.3f offset=%s%s -> %s",
             name,
             interior_mean, worst_ratio,
             "PASS" if grad_pass else "FAIL",
             h_seam_diff, v_seam_diff, worst_seam,
             "PASS" if seam_pass else "FAIL",
+            row_spike, col_spike, worst_offset,
+            "PASS" if offset_pass else "FAIL",
+            lf_str,
             "PASS" if is_tileable else "FAIL",
         )
         return is_tileable

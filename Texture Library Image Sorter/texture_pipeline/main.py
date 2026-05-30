@@ -79,12 +79,41 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--override-pass", action="store_true",
                    help="Run the tileability AI override pass independently "
                         "(processes all TILEABILITY_FAILED groups in the database).")
+
+    # --- Runtime / model overrides (used by GUI) ----------------------------
+    p.add_argument("--ai-model",            default=None,
+                   help="Ollama model tag, e.g. gemma4:e4b")
+    p.add_argument("--cpu-workers",         type=int,   default=None,
+                   help="Thread-pool size for CPU-bound passes")
+
+    # --- Filter thresholds --------------------------------------------------
+    p.add_argument("--blank-stddev",         type=float, default=None,
+                   help="Std-dev threshold below which an image is considered blank")
+    p.add_argument("--product-edge-stddev",  type=float, default=None,
+                   help="Edge std-dev threshold for product-photo detection")
+    p.add_argument("--line-art-threshold",   type=float, default=None,
+                   help="White-pixel ratio above which an image is classified line-art")
+    p.add_argument("--tile-gradient",        type=float, default=None,
+                   help="Gradient ratio threshold for tileability pass")
+    p.add_argument("--tile-seam-diff",       type=float, default=None,
+                   help="Seam difference threshold for tileability pass")
+    p.add_argument("--tile-offset-seam",     type=float, default=None,
+                   help="Offset-seam projected gradient ratio threshold (Signal 3)")
+    p.add_argument("--phash-hamming",        type=int,   default=None,
+                   help="Maximum Hamming distance for pHash duplicate detection")
+    p.add_argument("--min-resolution",       type=int,   default=None,
+                   help="Minimum short-side resolution in pixels")
+    p.add_argument("--auto-bin-tileability", action="store_true",
+                   help="Bin tileability failures instead of sending to review")
+    p.add_argument("--skip-quality-checks",  action="store_true",
+                   help="Skip pre-filters 2–4 and tileability test (trusted source)")
+
     return p.parse_args()
 
 
 def _build_config(args: argparse.Namespace) -> Config:
     out = Path(args.output)
-    return Config(
+    kwargs: dict = dict(
         input_dir             = Path(args.input),
         output_dir            = out,
         recycle_bin_dir       = Path(args.recycle_bin) if args.recycle_bin else out / "_recycle_bin",
@@ -92,6 +121,32 @@ def _build_config(args: argparse.Namespace) -> Config:
         db_path               = Path(args.db)           if args.db           else out / "pipeline_state.db",
         duplicate_report_path = out / "duplicate_report.txt",
     )
+    # Optional overrides from CLI (GUI passes these when non-default)
+    if args.ai_model is not None:
+        kwargs["ai_model"] = args.ai_model
+    if args.cpu_workers is not None:
+        kwargs["cpu_workers"] = args.cpu_workers
+    if args.blank_stddev is not None:
+        kwargs["blank_image_stddev_bin"] = args.blank_stddev
+    if args.product_edge_stddev is not None:
+        kwargs["product_photo_edge_stddev_threshold"] = args.product_edge_stddev
+    if args.line_art_threshold is not None:
+        kwargs["line_art_white_pixel_threshold"] = args.line_art_threshold
+    if args.tile_gradient is not None:
+        kwargs["tileability_gradient_ratio_threshold"] = args.tile_gradient
+    if args.tile_seam_diff is not None:
+        kwargs["tileability_seam_diff_threshold"] = args.tile_seam_diff
+    if args.tile_offset_seam is not None:
+        kwargs["tileability_offset_seam_ratio_threshold"] = args.tile_offset_seam
+    if args.phash_hamming is not None:
+        kwargs["phash_hamming_threshold"] = args.phash_hamming
+    if args.min_resolution is not None:
+        kwargs["min_resolution_px"] = args.min_resolution
+    if args.auto_bin_tileability:
+        kwargs["auto_bin_tileability_failures"] = True
+    if args.skip_quality_checks:
+        kwargs["skip_quality_checks"] = True
+    return Config(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +168,16 @@ def _copy_files(files: List[Path], dst_dir: Path) -> None:
     dst_dir.mkdir(parents=True, exist_ok=True)
     for f in files:
         if f.exists():
-            shutil.copy2(str(f), str(dst_dir / f.name))
+            try:
+                shutil.copy2(str(f), str(dst_dir / f.name))
+            except PermissionError as exc:
+                logger.warning(
+                    "Permission denied copying '%s' — skipping file: %s", f.name, exc
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not copy '%s' — skipping file: %s", f.name, exc
+                )
 
 
 def _route_duplicates(
@@ -273,6 +337,36 @@ def _route_ai_not_tileable(
         logger.info(
             "Routed %d AI-flagged non-tileable group(s) to "
             "_needs_review/ai_not_tileable/.",
+            count,
+        )
+
+
+def _route_render_preview(
+    groups: List[PBRGroup], db: DatabaseManager, config: Config
+) -> None:
+    """
+    Copy all source files for render-preview flagged groups to
+    _needs_review/render_preview/.
+
+    These groups passed Stage 3 tileability tests but the AI identified the
+    image as a 3D rendered preview of a material (e.g. a VRay, Corona, or
+    Blender render swatch) rather than an actual seamless texture asset.
+    Routed to review rather than recycle bin so legitimate textures that the
+    AI misjudged can be recovered.
+    """
+    dst_root = Path(config.review_dir) / "render_preview"
+    count    = 0
+    for g in groups:
+        row = db.get_group(g.group_id)
+        if row and row["status"] == GroupStatus.REVIEW_RENDER_PREVIEW.value:
+            _copy_files(
+                g.image_files + g.demo_files + g.pat_files,
+                dst_root / _safe_dir_name(g.base_name),
+            )
+            count += 1
+    if count:
+        logger.info(
+            "Routed %d render-preview group(s) to _needs_review/render_preview/.",
             count,
         )
 
@@ -753,12 +847,30 @@ def main() -> None:
                 )
                 continue
 
+            # Render preview guard: if the AI identifies this as a 3D rendered
+            # preview (e.g. a VRay/Corona/Blender material swatch) rather than
+            # an actual seamless texture asset, route it to review rather than
+            # writing it to the library.  Hint-routed groups are exempt (they
+            # are confirmed tileable from scan-time keyword matching).
+            if not category_hint and result.get("is_render_preview", False):
+                logger.info(
+                    "Render preview guard: '%s' tagged '%s' with is_render_preview=True. "
+                    "Routing to _needs_review/render_preview/.",
+                    group.base_name, category,
+                )
+                db.update_group_status(
+                    group.group_id, GroupStatus.REVIEW_RENDER_PREVIEW,
+                    detail=f"ai_render_preview_category_{category}",
+                )
+                continue
+
             file_ops.process_one(
                 group,
                 process_results.get(group.group_id),
             )
 
         _route_ai_not_tileable(groups, db, config)
+        _route_render_preview(groups, db, config)
         _route_misc(groups, db, config)
 
         # -------------------------------------------------------------------
