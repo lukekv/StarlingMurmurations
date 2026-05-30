@@ -169,11 +169,14 @@ class Config:
     # cannot catch this because opposite edges are the same colour; the
     # phase of the pattern is wrong but the pixel values are not.
     #
-    # 1.5 is a conservative default that catches hard misalignments while
-    # giving well-calibrated seamless bricks enough margin.  Lower this
-    # value to catch subtler seam artefacts; raise it if valid seamless
-    # textures with a prominent central feature are being flagged.
-    tileability_offset_seam_ratio_threshold: float = 1.5
+    # 2.0 is the empirically calibrated default (raised from 1.5 after a
+    # first-run failure rate of ~65% showed 1.5 was too aggressive for real
+    # professional libraries).  A clearly misaligned texture like a brick
+    # sheet cut at the wrong row typically scores 2.5–4.0; legitimately
+    # seamless textures with strong interior features (heavy grain, dominant
+    # mortar lines) typically score 1.0–1.8.  Lower toward 1.5 to catch
+    # subtler misalignments; raise above 2.5 if false positives persist.
+    tileability_offset_seam_ratio_threshold: float = 2.0
 
     # Filenames containing any of these keywords (case-insensitive) bypass
     # both tileability signals and are treated as confirmed tileable.

@@ -532,9 +532,16 @@ class ImageProcessor:
         # High-pass filter removes low-frequency lighting gradients before
         # edge comparison so directionally-lit textures are not penalised.
         # ------------------------------------------------------------------
+        lf_grad_std: Optional[float] = None
         if self.config.tileability_seam_highpass_enabled:
-            blur_k = max(31, round(min(h_px, w_px) * self.config.tileability_seam_highpass_blur_fraction))
-            rgb_cmp = rgb - cv2.blur(rgb, (blur_k, blur_k))
+            blur_k   = max(31, round(min(h_px, w_px) * self.config.tileability_seam_highpass_blur_fraction))
+            lf_blur  = cv2.blur(rgb, (blur_k, blur_k))
+            rgb_cmp  = rgb - lf_blur
+            # Low-frequency gradient std: std of the lighting envelope across
+            # all channels.  High values indicate baked directional lighting
+            # (characteristic of render previews).  Logged for calibration;
+            # not currently used as a filter threshold.
+            lf_grad_std = float(lf_blur.std())
         else:
             rgb_cmp = rgb
 
@@ -594,10 +601,11 @@ class ImageProcessor:
 
         is_tileable = grad_pass and seam_pass and offset_pass
 
+        lf_str = f" | lf_grad_std={lf_grad_std:.1f}" if lf_grad_std is not None else ""
         logger.debug(
             "Tileability '%s': interior_mean=%.2f worst_grad_ratio=%.3f "
             "grad=%s | h_seam=%.1f v_seam=%.1f worst_seam=%.1f seam=%s "
-            "| row_spike=%.3f col_spike=%.3f worst_offset=%.3f offset=%s -> %s",
+            "| row_spike=%.3f col_spike=%.3f worst_offset=%.3f offset=%s%s -> %s",
             name,
             interior_mean, worst_ratio,
             "PASS" if grad_pass else "FAIL",
@@ -605,6 +613,7 @@ class ImageProcessor:
             "PASS" if seam_pass else "FAIL",
             row_spike, col_spike, worst_offset,
             "PASS" if offset_pass else "FAIL",
+            lf_str,
             "PASS" if is_tileable else "FAIL",
         )
         return is_tileable

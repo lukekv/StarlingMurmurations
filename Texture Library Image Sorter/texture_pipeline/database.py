@@ -51,6 +51,7 @@ class GroupStatus(str, Enum):
     REVIEW_LINE_ART                = "review_line_art"
     REVIEW_AI_NOT_TILEABLE         = "review_ai_not_tileable"
     REVIEW_MESH_ASSET              = "review_mesh_asset"
+    REVIEW_RENDER_PREVIEW          = "review_render_preview"
 
 
 class FileStatus(str, Enum):

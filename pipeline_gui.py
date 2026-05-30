@@ -10,11 +10,13 @@ Requirements:
     pip install customtkinter
 """
 
+import datetime
 import json
 import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from tkinter import filedialog
 
@@ -38,31 +40,31 @@ _SETTINGS_FILE = _HERE / "gui_settings.json"
 _FACTORY_PRESETS: dict[str, dict] = {
     "1": {
         "blank_stddev": 3.5,  "product_edge": 18.0, "line_art": 0.50,
-        "tile_gradient": 1.40, "tile_seam": 15.0,   "tile_offset_seam": 1.25,
+        "tile_gradient": 1.40, "tile_seam": 15.0,   "tile_offset_seam": 1.50,
         "phash_hamming": 6,    "min_resolution": 768,
         "auto_bin": False,     "skip_checks": False,
     },
     "2": {
         "blank_stddev": 2.8,  "product_edge": 14.0, "line_art": 0.55,
-        "tile_gradient": 1.60, "tile_seam": 20.0,   "tile_offset_seam": 1.35,
+        "tile_gradient": 1.60, "tile_seam": 20.0,   "tile_offset_seam": 1.70,
         "phash_hamming": 5,    "min_resolution": 640,
         "auto_bin": False,     "skip_checks": False,
     },
     "3": {
         "blank_stddev": 2.0,  "product_edge": 10.0, "line_art": 0.60,
-        "tile_gradient": 1.80, "tile_seam": 25.0,   "tile_offset_seam": 1.50,
+        "tile_gradient": 1.80, "tile_seam": 25.0,   "tile_offset_seam": 2.00,
         "phash_hamming": 4,    "min_resolution": 512,
         "auto_bin": False,     "skip_checks": False,
     },
     "4": {
         "blank_stddev": 1.2,  "product_edge": 6.0,  "line_art": 0.72,
-        "tile_gradient": 2.20, "tile_seam": 38.0,   "tile_offset_seam": 1.80,
+        "tile_gradient": 2.20, "tile_seam": 38.0,   "tile_offset_seam": 2.50,
         "phash_hamming": 4,    "min_resolution": 512,
         "auto_bin": True,      "skip_checks": False,
     },
     "5": {
         "blank_stddev": 0.5,  "product_edge": 2.0,  "line_art": 0.90,
-        "tile_gradient": 1.80, "tile_seam": 25.0,   "tile_offset_seam": 1.50,
+        "tile_gradient": 1.80, "tile_seam": 25.0,   "tile_offset_seam": 2.00,
         "phash_hamming": 3,    "min_resolution": 256,
         "auto_bin": True,      "skip_checks": True,
     },
@@ -105,6 +107,7 @@ class PipelineGUI(ctk.CTk):
         self._current_level: int = 3
         self._adv_visible: bool = False
         self._settings: dict = {}
+        self._pending_chain: list | None = None   # command queued after current run
 
         self._load_settings()
         self._build_ui()
@@ -338,12 +341,35 @@ class PipelineGUI(ctk.CTk):
         btn_outer = ctk.CTkFrame(self, fg_color="transparent")
         btn_outer.grid(row=5, column=0, sticky="ew", padx=15, pady=(10, 4))
 
-        self._btn_run = ctk.CTkButton(
-            btn_outer, text="▶  Run Pipeline", width=160,
+        # Left stack: primary button + indented sub-buttons
+        left_stack = ctk.CTkFrame(btn_outer, fg_color="transparent")
+        left_stack.pack(side="left", padx=(0, 16))
+
+        self._btn_run_complete = ctk.CTkButton(
+            left_stack, text="▶  Run Complete Pipeline", width=224,
             fg_color="#2d6a4f", hover_color="#1b4332",
-            command=self._run_pipeline,
+            command=self._run_complete,
         )
-        self._btn_run.pack(side="left", padx=(0, 8))
+        self._btn_run_complete.pack(side="top", anchor="w", pady=(0, 5))
+
+        sub_row = ctk.CTkFrame(left_stack, fg_color="transparent")
+        sub_row.pack(side="top", anchor="w", padx=(14, 0))
+
+        self._btn_run_sorter = ctk.CTkButton(
+            sub_row, text="Sorter & Tagger", width=107,
+            fg_color="#245a41", hover_color="#1b4332",
+            font=ctk.CTkFont(size=12),
+            command=self._run_sorter,
+        )
+        self._btn_run_sorter.pack(side="left", padx=(0, 6))
+
+        self._btn_override = ctk.CTkButton(
+            sub_row, text="Override Pass", width=101,
+            fg_color="#245a41", hover_color="#1b4332",
+            font=ctk.CTkFont(size=12),
+            command=self._run_override_pass,
+        )
+        self._btn_override.pack(side="left")
 
         self._btn_stop = ctk.CTkButton(
             btn_outer, text="■  Stop", width=90,
@@ -538,16 +564,22 @@ class PipelineGUI(ctk.CTk):
     # Pipeline execution
     # ------------------------------------------------------------------
 
-    def _run_pipeline(self) -> None:
+    # ------------------------------------------------------------------
+    # Command builders
+    # ------------------------------------------------------------------
+
+    def _build_pipeline_cmd(self) -> list | None:
+        """Validate inputs and build the main pipeline command list.
+        Returns None and sets a status message if validation fails."""
         input_dir  = self._ent_input.get().strip()
         output_dir = self._ent_output.get().strip()
 
         if not input_dir or not output_dir:
             self._set_status("Input and output directories are required.", error=True)
-            return
+            return None
         if not Path(input_dir).is_dir():
             self._set_status("Input directory does not exist.", error=True)
-            return
+            return None
 
         self._save_settings()
         p = self._settings["presets"][str(self._current_level)]
@@ -572,8 +604,50 @@ class PipelineGUI(ctk.CTk):
             cmd.append("--auto-bin-tileability")
         if p["skip_checks"]:
             cmd.append("--skip-quality-checks")
+        return cmd
 
+    def _build_override_cmd(self) -> list:
+        """Build the override-pass command list."""
+        s = self._settings["last_session"]
+        return [
+            sys.executable, str(_MAIN_PY),
+            "--input",    self._ent_input.get().strip(),
+            "--output",   self._ent_output.get().strip(),
+            "--ai-model", s.get("ai_model", "gemma4:e4b"),
+            "--override-pass",
+        ]
+
+    # ------------------------------------------------------------------
+    # Pipeline execution
+    # ------------------------------------------------------------------
+
+    def _run_complete(self) -> None:
+        """Run the full pipeline, then automatically chain the override pass."""
+        cmd = self._build_pipeline_cmd()
+        if cmd is None:
+            return
+        self._pending_chain = self._build_override_cmd()
+        self._start_subprocess(cmd, cwd=str(_PIPELINE_DIR),
+                               status="Running complete pipeline…")
+
+    def _run_sorter(self) -> None:
+        """Run the main pipeline (Stages 1–4) only, without the override pass."""
+        cmd = self._build_pipeline_cmd()
+        if cmd is None:
+            return
+        self._pending_chain = None
         self._start_subprocess(cmd, cwd=str(_PIPELINE_DIR), status="Running pipeline…")
+
+    def _run_override_pass(self) -> None:
+        """Run the tileability AI override pass (--override-pass) only."""
+        output_dir = self._ent_output.get().strip()
+        if not output_dir:
+            self._set_status("Output directory required.", error=True)
+            return
+        self._save_settings()
+        self._pending_chain = None
+        self._start_subprocess(self._build_override_cmd(),
+                               cwd=str(_PIPELINE_DIR), status="Running override pass…")
 
     def _stop_pipeline(self) -> None:
         if self._proc and self._proc.poll() is None:
@@ -622,10 +696,11 @@ class PipelineGUI(ctk.CTk):
         )
 
     def _start_subprocess(
-        self, cmd: list[str], cwd: str, status: str
+        self, cmd: list[str], cwd: str, status: str, clear_log: bool = True
     ) -> None:
         """Launch *cmd* as a subprocess and begin streaming its output to the log."""
-        self._clear_log()
+        if clear_log:
+            self._clear_log()
         self._append_log("$ " + " ".join(f'"{a}"' if " " in a else a for a in cmd) + "\n", tag="info")
         self._append_log("─" * 60 + "\n", tag="info")
 
@@ -644,11 +719,14 @@ class PipelineGUI(ctk.CTk):
             self._set_status(f"Failed to launch: {exc}", error=True)
             return
 
-        self._btn_run.configure(state="disabled")
+        self._btn_run_complete.configure(state="disabled")
+        self._btn_run_sorter.configure(state="disabled")
+        self._btn_override.configure(state="disabled")
         self._btn_stop.configure(state="normal")
         self._btn_preview.configure(state="disabled")
         self._btn_rescan.configure(state="disabled")
         self._set_status(status)
+        self._last_output_time = time.monotonic()   # heartbeat baseline
 
         # Drain stdout in a daemon thread → queue → GUI thread
         threading.Thread(
@@ -670,28 +748,60 @@ class PipelineGUI(ctk.CTk):
         proc.wait()
         self._log_queue.put(None)   # sentinel: process has exited
 
+    _HEARTBEAT_INTERVAL = 30   # seconds of silence before showing a "still running" line
+
     def _poll_log_queue(self) -> None:
         """GUI timer: drain the log queue and append lines to the textbox."""
+        now = time.monotonic()
+        got_output = False
         try:
             while True:
                 item = self._log_queue.get_nowait()
                 if item is None:
                     self._on_subprocess_done()
                     return
+                got_output = True
                 self._append_log(item)
         except queue.Empty:
             pass
+
+        if got_output:
+            self._last_output_time = now
+        elif self._proc and (now - self._last_output_time) >= self._HEARTBEAT_INTERVAL:
+            # Process is alive but has been silent — show a timestamped heartbeat
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            silent = int(now - self._last_output_time)
+            self._append_log(
+                f"  [{ts}] … still running — no output for {silent}s\n",
+                tag="info",
+            )
+            self._last_output_time = now   # reset so we don't spam every 100 ms
+
         self.after(100, self._poll_log_queue)
 
     def _on_subprocess_done(self) -> None:
         rc = self._proc.returncode if self._proc else 0
+        self._proc = None
+
+        if rc == 0 and self._pending_chain:
+            # First stage of a chained run succeeded — start the next stage.
+            cmd = self._pending_chain
+            self._pending_chain = None
+            self._append_log("\n✓ Stage complete.\n", tag="success")
+            self._append_log("─" * 60 + "\n", tag="info")
+            self._append_log("▶  Starting Override Pass…\n\n", tag="info")
+            self._start_subprocess(cmd, cwd=str(_PIPELINE_DIR),
+                                   status="Running override pass…", clear_log=False)
+            return
+
+        # Final stage (or error): clear pending chain and restore buttons.
+        self._pending_chain = None
         if rc == 0:
             self._append_log("\n✓ Process completed successfully.\n", tag="success")
             self._set_status("Completed.")
         else:
             self._append_log(f"\n✗ Process exited with code {rc}.\n", tag="error")
             self._set_status(f"Exited with code {rc}.", error=True)
-        self._proc = None
         self._reset_buttons()
 
     # ------------------------------------------------------------------
@@ -733,7 +843,9 @@ class PipelineGUI(ctk.CTk):
         )
 
     def _reset_buttons(self) -> None:
-        self._btn_run.configure(state="normal")
+        self._btn_run_complete.configure(state="normal")
+        self._btn_run_sorter.configure(state="normal")
+        self._btn_override.configure(state="normal")
         self._btn_stop.configure(state="disabled")
         self._btn_preview.configure(state="normal")
         self._btn_rescan.configure(state="normal")

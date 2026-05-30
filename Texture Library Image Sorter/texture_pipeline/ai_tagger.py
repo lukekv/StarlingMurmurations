@@ -46,6 +46,13 @@ _SYSTEM_PROMPT = (
     "exactly one value from the color list provided in the user message\n"
     "  tags                  : array of 3-8 lowercase tags using underscores\n"
     "  is_tileable           : true if the texture appears seamlessly tileable\n"
+    "  is_render_preview     : true if this image is a 3D rendered preview of a material "
+    "(e.g. a VRay, Corona, Blender, or Arnold render swatch, material ball, or any "
+    "computer-generated preview image) rather than a flat seamless texture captured by "
+    "photography, photogrammetry scan, or procedural generation as a tiling asset. Signs "
+    "include baked directional lighting, specular highlights baked into the diffuse "
+    "channel, ambient occlusion, render anti-aliasing, or a clearly synthetic rendered "
+    "visual quality. Set false for real photographs and genuine seamless texture maps.\n"
     "  real_world_size_estimate : estimated real-world size e.g. '1m x 1m' or 'unknown'\n"
     "\n"
     "CRITICAL CLASSIFICATION RULES:\n"
@@ -279,6 +286,7 @@ class AITagResult(BaseModel):
     dominant_color:            str
     tags:                      List[str]
     is_tileable:               bool
+    is_render_preview:         bool = False
     real_world_size_estimate:  Optional[str] = "unknown"
 
     @field_validator("tags", mode="before")
@@ -534,7 +542,7 @@ class AITagger:
             "(use the name exactly as written):\n\n"
             f"  {colors_str}\n\n"
             "Return JSON only: category, material, material_type, dominant_color, "
-            f"tags, is_tileable, real_world_size_estimate.{geometry_note}{filename_note}"
+            f"tags, is_tileable, is_render_preview, real_world_size_estimate.{geometry_note}{filename_note}"
         )
         return [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -602,6 +610,10 @@ class AITagger:
         if "is_tileable" not in normalised:
             logger.debug("is_tileable absent; defaulting to True.")
             normalised["is_tileable"] = True
+
+        if "is_render_preview" not in normalised:
+            logger.debug("is_render_preview absent; defaulting to False.")
+            normalised["is_render_preview"] = False
 
         if "dominant_color" not in normalised:
             logger.debug("dominant_color absent; defaulting to Grey.")

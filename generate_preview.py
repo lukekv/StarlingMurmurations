@@ -30,6 +30,13 @@ try:
 except ImportError:
     sys.exit("Pillow is required: pip install pillow --break-system-packages")
 
+# Suppress Pillow's DecompressionBombWarning for large-but-valid textures.
+# Professional texture libraries routinely contain 100–180 MP images; the
+# warning is a DOS-attack guard for untrusted web images and is noise here.
+# Images that actually exceed the hard error limit (~178 MP) are still caught
+# and handled gracefully inside make_thumbnail().
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -75,9 +82,7 @@ def make_thumbnail(src: Path, thumb_dir: Path, prefix: str = "") -> str | None:
         return f"{THUMB_DIR}/{thumb_name}" if thumb_path.stat().st_size > 0 else None
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")   # suppress DecompressionBombWarning
-            img = Image.open(src).convert("RGB")
+        img = Image.open(src).convert("RGB")
         img.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
         img.save(thumb_path, "JPEG", quality=75, optimize=True)
     except Exception as exc:
@@ -743,6 +748,11 @@ let _changeCount  = 0;
 let filterPbrOnly = false;
 let _selected      = new Set();
 let _selectedItems = new Map();
+const _rIC = window.requestIdleCallback
+  ? (fn) => window.requestIdleCallback(fn, { timeout: 500 })
+  : (fn) => setTimeout(fn, 0);
+let _renderToken = 0;
+let _searchTimer = null;
 function selKey(item) { return item.folder_path + '|' + (item.source_file || ''); }
 
 // ---- PBR filter ----
@@ -785,6 +795,7 @@ function removeItemFromData(item) {
       break;
     }
   }
+  _invalidateCache();
   renderTabs();
   renderGrid();
 }
@@ -792,7 +803,12 @@ function removeItemFromData(item) {
 function isReview(cat) { return cat.startsWith("Review:"); }
 function isBin(cat)    { return cat.startsWith("Bin:"); }
 
-function allItems() { return DATA.flatMap(([, items]) => items); }
+let _allItemsCache = null;
+function allItems() {
+  if (!_allItemsCache) _allItemsCache = DATA.flatMap(([, items]) => items);
+  return _allItemsCache;
+}
+function _invalidateCache() { _allItemsCache = null; }
 
 function catItems(cat) {
   const e = DATA.find(([n]) => n === cat);
@@ -842,6 +858,7 @@ function makeTab(name, count, active, review, bin) {
 
 // ---- Grid ----
 function renderGrid() {
+  const token = ++_renderToken;
   const grid = document.getElementById("grid");
   grid.innerHTML = "";
 
@@ -863,7 +880,23 @@ function renderGrid() {
     return;
   }
 
-  items.forEach(item => grid.appendChild(makeCard(item)));
+  const BATCH = 60;
+  const frag = document.createDocumentFragment();
+  const first = Math.min(BATCH, n);
+  for (let i = 0; i < first; i++) frag.appendChild(makeCard(items[i]));
+  grid.appendChild(frag);
+
+  if (n <= BATCH) return;
+
+  function appendBatch(start) {
+    if (token !== _renderToken) return; // a newer render started; abort
+    const f = document.createDocumentFragment();
+    const end = Math.min(start + BATCH, n);
+    for (let i = start; i < end; i++) f.appendChild(makeCard(items[i]));
+    grid.appendChild(f);
+    if (end < n) _rIC(() => appendBatch(end));
+  }
+  _rIC(() => appendBatch(first));
 }
 
 // ---- Card ----
@@ -1079,12 +1112,16 @@ function copyActivePath() {
 
 // ---- Search ----
 function onSearch(val) {
-  searchQuery = val.trim();
-  renderTabs();
-  renderGrid();
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(() => {
+    searchQuery = val.trim();
+    renderTabs();
+    renderGrid();
+  }, 250);
 }
 
 function clearSearch() {
+  clearTimeout(_searchTimer);
   document.getElementById("search").value = "";
   searchQuery = "";
   renderTabs();

@@ -168,7 +168,16 @@ def _copy_files(files: List[Path], dst_dir: Path) -> None:
     dst_dir.mkdir(parents=True, exist_ok=True)
     for f in files:
         if f.exists():
-            shutil.copy2(str(f), str(dst_dir / f.name))
+            try:
+                shutil.copy2(str(f), str(dst_dir / f.name))
+            except PermissionError as exc:
+                logger.warning(
+                    "Permission denied copying '%s' — skipping file: %s", f.name, exc
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not copy '%s' — skipping file: %s", f.name, exc
+                )
 
 
 def _route_duplicates(
@@ -328,6 +337,36 @@ def _route_ai_not_tileable(
         logger.info(
             "Routed %d AI-flagged non-tileable group(s) to "
             "_needs_review/ai_not_tileable/.",
+            count,
+        )
+
+
+def _route_render_preview(
+    groups: List[PBRGroup], db: DatabaseManager, config: Config
+) -> None:
+    """
+    Copy all source files for render-preview flagged groups to
+    _needs_review/render_preview/.
+
+    These groups passed Stage 3 tileability tests but the AI identified the
+    image as a 3D rendered preview of a material (e.g. a VRay, Corona, or
+    Blender render swatch) rather than an actual seamless texture asset.
+    Routed to review rather than recycle bin so legitimate textures that the
+    AI misjudged can be recovered.
+    """
+    dst_root = Path(config.review_dir) / "render_preview"
+    count    = 0
+    for g in groups:
+        row = db.get_group(g.group_id)
+        if row and row["status"] == GroupStatus.REVIEW_RENDER_PREVIEW.value:
+            _copy_files(
+                g.image_files + g.demo_files + g.pat_files,
+                dst_root / _safe_dir_name(g.base_name),
+            )
+            count += 1
+    if count:
+        logger.info(
+            "Routed %d render-preview group(s) to _needs_review/render_preview/.",
             count,
         )
 
@@ -808,12 +847,30 @@ def main() -> None:
                 )
                 continue
 
+            # Render preview guard: if the AI identifies this as a 3D rendered
+            # preview (e.g. a VRay/Corona/Blender material swatch) rather than
+            # an actual seamless texture asset, route it to review rather than
+            # writing it to the library.  Hint-routed groups are exempt (they
+            # are confirmed tileable from scan-time keyword matching).
+            if not category_hint and result.get("is_render_preview", False):
+                logger.info(
+                    "Render preview guard: '%s' tagged '%s' with is_render_preview=True. "
+                    "Routing to _needs_review/render_preview/.",
+                    group.base_name, category,
+                )
+                db.update_group_status(
+                    group.group_id, GroupStatus.REVIEW_RENDER_PREVIEW,
+                    detail=f"ai_render_preview_category_{category}",
+                )
+                continue
+
             file_ops.process_one(
                 group,
                 process_results.get(group.group_id),
             )
 
         _route_ai_not_tileable(groups, db, config)
+        _route_render_preview(groups, db, config)
         _route_misc(groups, db, config)
 
         # -------------------------------------------------------------------
