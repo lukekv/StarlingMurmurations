@@ -155,6 +155,29 @@ class Config:
     # gradients while leaving structural texture detail intact.
     tileability_seam_highpass_blur_fraction: float = 0.125
 
+    # Offset-seam projected gradient ratio threshold (Signal 3).
+    # The image is rolled 50 % in X and Y so the tile seam appears at centre.
+    # A 1-D gradient magnitude profile is then projected along each axis;
+    # this threshold compares the mean gradient at the centre-seam strip
+    # (±edge_strip_px around the midpoint) to the mean across the remainder
+    # of the image (excluding both the centre strip and the outer edges).
+    #
+    # 1.0 = centre is identical to the rest (perfectly seamless).
+    # A value above ~1.5 indicates a visible seam -- e.g. brick courses
+    # that are misaligned when tiled, creating a prominent ridge line where
+    # the two halves meet.  The plain colour-difference test (Signal 2)
+    # cannot catch this because opposite edges are the same colour; the
+    # phase of the pattern is wrong but the pixel values are not.
+    #
+    # 2.0 is the empirically calibrated default (raised from 1.5 after a
+    # first-run failure rate of ~65% showed 1.5 was too aggressive for real
+    # professional libraries).  A clearly misaligned texture like a brick
+    # sheet cut at the wrong row typically scores 2.5–4.0; legitimately
+    # seamless textures with strong interior features (heavy grain, dominant
+    # mortar lines) typically score 1.0–1.8.  Lower toward 1.5 to catch
+    # subtler misalignments; raise above 2.5 if false positives persist.
+    tileability_offset_seam_ratio_threshold: float = 2.0
+
     # Filenames containing any of these keywords (case-insensitive) bypass
     # both tileability signals and are treated as confirmed tileable.
     #
@@ -193,6 +216,12 @@ class Config:
 
     # When False (default): ALL tileability failures go to _needs_review.
     auto_bin_tileability_failures: bool = False
+
+    # When True: skip pre-filters 2–4 (blank, line-art, product-photo) and
+    # the tileability test entirely.  Use when the input source is known-good
+    # (e.g. a professional seamless texture library) and you want maximum
+    # throughput.  Pre-filter 1 (minimum resolution) still runs.
+    skip_quality_checks: bool = False
 
     # ------------------------------------------------------------------
     # pHash deduplication
