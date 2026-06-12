@@ -99,12 +99,15 @@ def make_thumbnail(src: Path, thumb_dir: Path, prefix: str = "") -> str | None:
 
 def find_sidecar(texture_dir: Path) -> dict | None:
     """Return parsed JSON sidecar from texture_dir, or None."""
-    for f in texture_dir.iterdir():
-        if f.suffix == ".json":
-            try:
-                return json.loads(f.read_text(encoding="utf-8"))
-            except Exception:
-                return None
+    for f in sorted(texture_dir.glob("*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        # Third-party metadata (e.g. Quixel assetsData.json) can be a JSON
+        # list — only a dict is a usable pipeline sidecar.
+        if isinstance(data, dict):
+            return data
     return None
 
 

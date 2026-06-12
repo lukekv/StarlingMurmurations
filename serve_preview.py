@@ -159,12 +159,14 @@ def accept_misc(folder_path: Path, target_category: str) -> dict:
 
     # Read sidecar
     sidecar: dict = {}
-    for f in folder_path.iterdir():
-        if f.suffix == ".json":
-            try:
-                sidecar = json.loads(f.read_text(encoding="utf-8"))
-            except Exception as exc:
-                return {"ok": False, "error": f"Cannot read sidecar: {exc}"}
+    for f in sorted(folder_path.glob("*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"ok": False, "error": f"Cannot read sidecar: {exc}"}
+        # Skip non-dict JSON (e.g. third-party metadata stored as a list).
+        if isinstance(data, dict):
+            sidecar = data
             break
 
     material       = sidecar.get("material")       or "Unknown"
