@@ -2,3 +2,19 @@
 # Collection is restricted to tests/ so pytest never crawls the texture
 # library asset folders or pipeline output directories at the repo root.
 testpaths = ["tests"]
+
+[tool.ruff]
+# The asset library and pipeline output live inside the repo folder but are
+# not tracked; keep ruff out of them when run locally.
+extend-exclude = [
+    "_Shared Asset Library",
+    "_MHOA Basic Materials",
+    "_output",
+    "node_modules",
+]
+
+[tool.ruff.lint]
+# Error-level rules only: syntax errors (E9) and pyflakes correctness (F).
+# Style enforcement on existing code is deliberately out of scope -- see
+# issue #4. Tighten incrementally if wanted.
+select = ["E9", "F"]

@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: "Texture Library Image Sorter/texture_pipeline/requirements.txt"
+
+      # opencv-python needs libGL at import time; the slim runner image
+      # does not guarantee it.
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libgl1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r "Texture Library Image Sorter/texture_pipeline/requirements.txt"
+          pip install pytest ruff
+
+      - name: Lint (error-level rules only)
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q

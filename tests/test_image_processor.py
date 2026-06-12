@@ -9,7 +9,6 @@ to a stub that records status updates.
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 from PIL import Image
 
 from config import Config
