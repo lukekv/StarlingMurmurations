@@ -38,3 +38,8 @@ gui_settings.json
 
 # ── Rescan logs (generated output) ───────────────────────────────────────────
 rescan_*.log
+
+# ── PyInstaller / installer build output ─────────────────────────────────────
+build/
+dist/
+installer/Output/
