@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $v = "0.0.0-dev"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r "Texture Library Image Sorter/texture_pipeline/requirements.txt"
+          pip install customtkinter pyinstaller
+
+      - name: Build app (PyInstaller)
+        run: pyinstaller installer/StarlingMurmurations.spec --noconfirm
+
+      # The exe is a windowed app; PowerShell does not wait for it or relay
+      # its exit code on direct invocation, so use Start-Process -Wait.
+      - name: Smoke test frozen dispatch
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/StarlingMurmurations/StarlingMurmurations.exe" `
+                -ArgumentList "--run-pipeline","--help" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "Dispatch smoke test failed with exit code $($p.ExitCode)" }
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=${{ steps.version.outputs.version }} installer\installer.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StarlingMurmurations-installer-${{ steps.version.outputs.version }}
+          path: installer/Output/*.exe
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installer = Get-ChildItem installer/Output/*.exe | Select-Object -First 1
+          gh release create "${{ github.ref_name }}" $installer.FullName `
+            --title "StarlingMurmurations ${{ github.ref_name }}" --generate-notes

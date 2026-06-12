@@ -12,6 +12,7 @@ Requirements:
 
 import datetime
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -31,7 +32,52 @@ _PIPELINE_DIR  = _HERE / "Texture Library Image Sorter" / "texture_pipeline"
 _MAIN_PY       = _PIPELINE_DIR / "main.py"
 _RESCAN_PY     = _PIPELINE_DIR / "rescan_library.py"
 _PREVIEW_PY    = _HERE / "generate_preview.py"
-_SETTINGS_FILE = _HERE / "gui_settings.json"
+
+# Frozen (PyInstaller) builds have no on-disk .py scripts to hand to a Python
+# interpreter, and the install directory (Program Files) is not writable.
+# The exe re-enters its bundled pipeline modules via --run-* dispatch flags
+# (see _frozen_dispatch), and settings move to %LOCALAPPDATA%.
+_FROZEN = bool(getattr(sys, "frozen", False))
+
+if _FROZEN:
+    _SETTINGS_FILE = (
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+        / "StarlingMurmurations" / "gui_settings.json"
+    )
+else:
+    _SETTINGS_FILE = _HERE / "gui_settings.json"
+
+_DISPATCH_FLAGS = {
+    "--run-pipeline": "main",
+    "--run-rescan":   "rescan_library",
+    "--run-preview":  "generate_preview",
+}
+
+
+def _frozen_dispatch() -> bool:
+    """
+    In a frozen build, a --run-* first argument re-enters one of the bundled
+    pipeline scripts instead of starting the GUI. Returns True if dispatched.
+    """
+    if not _FROZEN or len(sys.argv) < 2 or sys.argv[1] not in _DISPATCH_FLAGS:
+        return False
+    import runpy
+    module = _DISPATCH_FLAGS[sys.argv[1]]
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    runpy.run_module(module, run_name="__main__")
+    return True
+
+
+def _spawn_cmd(flag: str, script: Path) -> list[str]:
+    """Command prefix for launching a pipeline script as a subprocess."""
+    if _FROZEN:
+        return [sys.executable, flag]
+    return [sys.executable, str(script)]
+
+
+def _spawn_cwd(default_dir: Path) -> str:
+    """Working directory for spawned commands (exe dir when frozen)."""
+    return str(Path(sys.executable).parent) if _FROZEN else str(default_dir)
 
 # ---------------------------------------------------------------------------
 # Factory defaults
@@ -140,6 +186,7 @@ class PipelineGUI(ctk.CTk):
         self._capture_session()
         self._capture_preset()
         try:
+            _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
             _SETTINGS_FILE.write_text(
                 json.dumps(self._settings, indent=2), encoding="utf-8"
             )
@@ -586,7 +633,7 @@ class PipelineGUI(ctk.CTk):
         s = self._settings["last_session"]
 
         cmd = [
-            sys.executable, str(_MAIN_PY),
+            *_spawn_cmd("--run-pipeline", _MAIN_PY),
             "--input",               input_dir,
             "--output",              output_dir,
             "--ai-model",            s.get("ai_model", "gemma4:e4b"),
@@ -610,7 +657,7 @@ class PipelineGUI(ctk.CTk):
         """Build the override-pass command list."""
         s = self._settings["last_session"]
         return [
-            sys.executable, str(_MAIN_PY),
+            *_spawn_cmd("--run-pipeline", _MAIN_PY),
             "--input",    self._ent_input.get().strip(),
             "--output",   self._ent_output.get().strip(),
             "--ai-model", s.get("ai_model", "gemma4:e4b"),
@@ -627,7 +674,7 @@ class PipelineGUI(ctk.CTk):
         if cmd is None:
             return
         self._pending_chain = self._build_override_cmd()
-        self._start_subprocess(cmd, cwd=str(_PIPELINE_DIR),
+        self._start_subprocess(cmd, cwd=_spawn_cwd(_PIPELINE_DIR),
                                status="Running complete pipeline…")
 
     def _run_sorter(self) -> None:
@@ -636,7 +683,7 @@ class PipelineGUI(ctk.CTk):
         if cmd is None:
             return
         self._pending_chain = None
-        self._start_subprocess(cmd, cwd=str(_PIPELINE_DIR), status="Running pipeline…")
+        self._start_subprocess(cmd, cwd=_spawn_cwd(_PIPELINE_DIR), status="Running pipeline…")
 
     def _run_override_pass(self) -> None:
         """Run the tileability AI override pass (--override-pass) only."""
@@ -647,7 +694,7 @@ class PipelineGUI(ctk.CTk):
         self._save_settings()
         self._pending_chain = None
         self._start_subprocess(self._build_override_cmd(),
-                               cwd=str(_PIPELINE_DIR), status="Running override pass…")
+                               cwd=_spawn_cwd(_PIPELINE_DIR), status="Running override pass…")
 
     def _stop_pipeline(self) -> None:
         if self._proc and self._proc.poll() is None:
@@ -663,8 +710,8 @@ class PipelineGUI(ctk.CTk):
             return
 
         self._save_settings()
-        cmd = [sys.executable, str(_PREVIEW_PY), "--output", output_dir]
-        self._start_subprocess(cmd, cwd=str(_HERE), status="Generating preview…")
+        cmd = [*_spawn_cmd("--run-preview", _PREVIEW_PY), "--output", output_dir]
+        self._start_subprocess(cmd, cwd=_spawn_cwd(_HERE), status="Generating preview…")
 
     def _rescan_library(self) -> None:
         """
@@ -681,7 +728,7 @@ class PipelineGUI(ctk.CTk):
         p = self._settings["presets"][str(self._current_level)]
 
         cmd = [
-            sys.executable, str(_RESCAN_PY),
+            *_spawn_cmd("--run-rescan", _RESCAN_PY),
             "--library",             output_dir,
             "--blank-stddev",        str(p["blank_stddev"]),
             "--product-edge-stddev", str(p["product_edge"]),
@@ -692,7 +739,7 @@ class PipelineGUI(ctk.CTk):
             "--min-resolution",      str(p["min_resolution"]),
         ]
         self._start_subprocess(
-            cmd, cwd=str(_PIPELINE_DIR), status="Rescanning library…"
+            cmd, cwd=_spawn_cwd(_PIPELINE_DIR), status="Rescanning library…"
         )
 
     def _start_subprocess(
@@ -790,7 +837,7 @@ class PipelineGUI(ctk.CTk):
             self._append_log("\n✓ Stage complete.\n", tag="success")
             self._append_log("─" * 60 + "\n", tag="info")
             self._append_log("▶  Starting Override Pass…\n\n", tag="info")
-            self._start_subprocess(cmd, cwd=str(_PIPELINE_DIR),
+            self._start_subprocess(cmd, cwd=_spawn_cwd(_PIPELINE_DIR),
                                    status="Running override pass…", clear_log=False)
             return
 
@@ -866,5 +913,7 @@ class PipelineGUI(ctk.CTk):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    if _frozen_dispatch():
+        sys.exit(0)
     app = PipelineGUI()
     app.mainloop()
