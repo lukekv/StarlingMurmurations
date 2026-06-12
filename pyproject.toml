@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Collection is restricted to tests/ so pytest never crawls the texture
+# library asset folders or pipeline output directories at the repo root.
+testpaths = ["tests"]
