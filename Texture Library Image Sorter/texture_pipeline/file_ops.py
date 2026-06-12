@@ -47,7 +47,7 @@ from PIL import Image
 
 from config import Config
 from database import DatabaseManager, GroupStatus
-from image_processor import CropBbox, ProcessResult
+from image_processor import ProcessResult
 from scanner import PBRGroup
 
 logger = logging.getLogger(__name__)
